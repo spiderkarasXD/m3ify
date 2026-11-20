@@ -44,18 +44,31 @@
     dialog.setAttribute('aria-labelledby', heading.id);
     header.append(heading, button(t('close'), () => dialog.close()));
     dialog.append(header, node('p', '', t('note')));
-    const language = node('select');
-    for (const [value, label] of [['auto', t('auto')], ['ru', 'Русский'], ['en', 'English']]) { const option = node('option', '', label); option.value = value; language.append(option); }
-    language.value = settings.language;
-    function row(key, input) { const label = node('label', 'm3-setting'); input.setAttribute('aria-label', t(key)); label.append(node('span', '', t(key)), input); dialog.append(label); }
-    row('language', language);
-    language.addEventListener('change', () => { settings.language = language.value; persist(); dialog.close(); openSettings(); settingsButton.textContent = t('settings'); });
-    for (const key of ['dynamic', 'amoled', 'wave', 'motion', 'canvas']) {
-      const input = node('input'); input.type = 'checkbox'; input.checked = !!settings[key];
-      input.addEventListener('change', () => { settings[key] = input.checked; persist(); }); row(key, input);
+    function row(key, input) { const label = node('div', 'm3-setting'); input.setAttribute('aria-label', t(key)); label.append(node('span', '', t(key)), input); dialog.append(label); }
+    const language = node('div', 'm3-segments'); language.setAttribute('role', 'group');
+    for (const [value, label] of [['auto', t('auto')], ['ru', 'Русский'], ['en', 'English']]) {
+      const option = button(label, () => { settings.language = value; persist(); dialog.close(); openSettings(); settingsButton.textContent = t('settings'); });
+      option.setAttribute('aria-pressed', String(settings.language === value)); language.append(option);
     }
-    const color = node('input'); color.type = 'color'; color.value = settings.color;
-    color.addEventListener('input', () => { settings.color = color.value; settings.dynamic = false; persist(); dialog.querySelector('input[type="checkbox"]').checked = false; }); row('color', color);
+    row('language', language);
+    for (const key of ['dynamic', 'amoled', 'wave', 'motion', 'canvas']) {
+      const input = button('', () => { settings[key] = !settings[key]; input.setAttribute('aria-checked', String(settings[key])); persist(); });
+      input.className = 'm3-switch'; input.setAttribute('role', 'switch'); input.setAttribute('aria-checked', String(!!settings[key])); row(key, input);
+    }
+    const color = node('div', 'm3-colors'); color.setAttribute('role', 'group');
+    const chooseColor = value => {
+      settings.color = value; settings.dynamic = false; persist();
+      dialog.querySelector('[role="switch"]').setAttribute('aria-checked', 'false');
+      for (const swatch of color.querySelectorAll('button')) swatch.setAttribute('aria-pressed', String(swatch.dataset.color === value));
+    };
+    for (const value of ['#d1e9b8', '#b9dcf5', '#d4c4ef', '#f1c2cb', '#f3d2a5', '#e3e3db']) {
+      const swatch = button('', () => chooseColor(value)); swatch.className = 'm3-swatch'; swatch.dataset.color = value;
+      swatch.style.setProperty('--swatch', value); swatch.setAttribute('aria-label', value); swatch.setAttribute('aria-pressed', String(settings.color === value)); color.append(swatch);
+    }
+    row('color', color);
+    const custom = node('input'); custom.type = 'text'; custom.value = settings.color; custom.maxLength = 7; custom.spellcheck = false; custom.className = 'm3-hex';
+    custom.setAttribute('aria-label', 'HEX'); custom.addEventListener('change', () => { if (/^#[a-f0-9]{6}$/i.test(custom.value)) { chooseColor(custom.value); custom.removeAttribute('aria-invalid'); } else custom.setAttribute('aria-invalid', 'true'); });
+    color.append(custom);
     const actions = node('div', 'm3-actions');
     actions.append(button(t('local'), () => { api.Platform.History.push('/collection/local-files'); dialog.close(); }), button(t('folder'), () => { api.Platform.History.push('/preferences'); api.showNotification(t('folderNote')); dialog.close(); }));
     dialog.append(actions);
