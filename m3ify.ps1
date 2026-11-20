@@ -1,5 +1,5 @@
 ﻿<#
-  m3ify — Material 3 поверх Spotify Desktop (как spicetify, но без маркета и лишнего).
+  m3ify — тема Material 3 для Spotify Desktop на Spicetify.
 
   m3ify.ps1 install    скопировать в %LOCALAPPDATA%\m3ify, применить тему, иконки, ярлык
   m3ify.ps1 apply      (пере)применить тему (после обновления Spotify)
@@ -10,7 +10,7 @@
 #>
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('install', 'apply', 'restore', 'uninstall', 'launch', 'status', 'icon')]
+  [ValidateSet('install', 'apply', 'repair', 'restore', 'uninstall', 'launch', 'status', 'icon')]
   [string]$Command = 'status',
   [switch]$Quiet
 )
@@ -18,7 +18,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-$Version    = '1.3.0'
+$Version    = '1.4.0'
 $SrcDir     = $PSScriptRoot
 $HomeDir    = Join-Path $env:LOCALAPPDATA 'm3ify'
 $BackupDir  = Join-Path $HomeDir 'backup'
@@ -29,7 +29,6 @@ $SpotifyExe = Join-Path $SpotifyDir 'Spotify.exe'
 $AppsDir    = Join-Path $SpotifyDir 'Apps'
 $Spa        = Join-Path $AppsDir 'xpui.spa'
 $Xpui       = Join-Path $AppsDir 'xpui'
-$Marker     = '<!--m3ify-->'
 
 function Say($msg, $color = 'Gray') { if (-not $Quiet) { Write-Host $msg -ForegroundColor $color } }
 function Ok($msg)  { Say "  [ok] $msg" 'Green' }
@@ -74,64 +73,192 @@ function Expand-Spa($zipPath, $dest) {
   } finally { $zip.Dispose() }
 }
 
-function Get-State { if (Test-Path $StateFile) { Get-Content $StateFile -Raw | ConvertFrom-Json } }
+function Get-State { if (Test-Path $StateFile) { try { Get-Content $StateFile -Raw | ConvertFrom-Json } catch { return $null } } }
 function Save-State($obj) { $obj | ConvertTo-Json | Set-Content $StateFile -Encoding UTF8 }
 
 function Get-SpotifyVersion { (Get-Item $SpotifyExe).VersionInfo.ProductVersion }
 
-function Invoke-Apply {
-  Assert-Spotify
-  if (-not (Test-Path (Join-Path $HomeDir 'theme\m3.css'))) { Die (L 'не установлен — запусти install.cmd' 'not installed — run install.cmd') }
-  Stop-Spotify
-  [void](New-Item -ItemType Directory -Force $BackupDir)
+# Spicetify owns Spotify backups and patching; m3ify is a normal theme.
+function Find-Spicetify {
+  $cmd = Get-Command spicetify.exe -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+  $path = Join-Path $env:LOCALAPPDATA 'spicetify\spicetify.exe'
+  if (Test-Path $path) { return $path }
+}
 
-  if (Test-Path $Spa) {
-    # свежий/обновлённый Spotify: бэкапим оригинал и распаковываем начисто
-    Copy-Item $Spa (Join-Path $BackupDir 'xpui.spa') -Force
-    Ok (L "бэкап xpui.spa (Spotify $(Get-SpotifyVersion))" "backed up xpui.spa (Spotify $(Get-SpotifyVersion))")
-    if (Test-Path $Xpui) { Remove-Item $Xpui -Recurse -Force }
-    Expand-Spa $Spa $Xpui
-    Remove-Item $Spa -Force
-    Ok (L 'xpui распакован' 'xpui extracted')
-  } elseif (-not (Test-Path (Join-Path $Xpui 'index.html'))) {
-    Die (L 'нет ни xpui.spa, ни xpui\index.html — переустанови Spotify' 'neither xpui.spa nor xpui\index.html found — reinstall Spotify')
+function Install-Spicetify {
+  if (Find-Spicetify) { return }
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  $arch = if ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' }
+          elseif ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x32' }
+  $release = Invoke-RestMethod 'https://api.github.com/repos/spicetify/cli/releases/latest'
+  $asset = @($release.assets | Where-Object { $_.name -match "^spicetify-[\d.]+-windows-$arch\.zip$" })
+  if ($asset.Count -ne 1) { Die 'Spicetify release archive not found' }
+  $download = $asset[0].browser_download_url
+  if ($download -notlike 'https://github.com/spicetify/cli/releases/download/*') { Die 'Unexpected Spicetify download URL' }
+  $temp = Join-Path $HomeDir ('download-' + [guid]::NewGuid().ToString('N'))
+  [void](New-Item -ItemType Directory $temp)
+  try {
+    $zip = Join-Path $temp 'spicetify.zip'
+    Invoke-WebRequest $download -UseBasicParsing -OutFile $zip
+    if ($asset[0].digest -match '^sha256:([a-fA-F0-9]{64})$') {
+      if ((Get-FileHash $zip -Algorithm SHA256).Hash -ine $Matches[1]) { Die 'Spicetify checksum mismatch' }
+    }
+    $dest = Join-Path $env:LOCALAPPDATA 'spicetify'
+    [void](New-Item -ItemType Directory -Force $dest)
+    Expand-Spa $zip $dest
+    if (-not (Find-Spicetify)) { Die 'Spicetify executable missing from archive' }
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (($userPath -split ';') -notcontains $dest) {
+      [Environment]::SetEnvironmentVariable('Path', (([string]$userPath).TrimEnd(';') + ';' + $dest), 'User')
+    }
+    Ok (L 'Spicetify установлен' 'Spicetify installed')
+  } finally {
+    # Only remove the concrete download directory we just created under m3ify.
+    if ((Split-Path ([IO.Path]::GetFullPath($temp))) -eq [IO.Path]::GetFullPath($HomeDir)) {
+      Remove-Item -LiteralPath $temp -Recurse -Force
+    }
   }
+}
 
+function Quote-NativeArgument([string]$Value) {
+  '"' + ([regex]::Replace(([regex]::Replace($Value, '(\\*)"', '$1$1\"')), '(\\+)$', '$1$1')) + '"'
+}
+
+function Invoke-Spice([string[]]$Arguments) {
+  $exe = Find-Spicetify
+  if (-not $exe) { Die (L 'Spicetify не найден — запусти install.cmd' 'Spicetify missing — run install.cmd') }
+  $info = New-Object Diagnostics.ProcessStartInfo
+  $info.FileName = $exe
+  $info.Arguments = ($Arguments | ForEach-Object { Quote-NativeArgument $_ }) -join ' '
+  $info.UseShellExecute = $false
+  $info.CreateNoWindow = $true
+  $info.RedirectStandardOutput = $true
+  $info.RedirectStandardError = $true
+  $process = [Diagnostics.Process]::Start($info)
+  try {
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $output = $stdout.Result + $stderr.Result
+    if ($process.ExitCode -ne 0) { Die "Spicetify $($Arguments -join ' '): $output" }
+    if (-not $Quiet) { Write-Host $output }
+  } finally { $process.Dispose() }
+}
+
+function Get-SpiceConfig {
+  $exe = Find-Spicetify
+  $path = & $exe -c
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path ($path | Select-Object -Last 1))) { Die 'Cannot locate Spicetify config' }
+  ($path | Select-Object -Last 1).Trim()
+}
+
+function Set-SpiceTheme {
+  $config = Get-SpiceConfig
+  $saved = Join-Path $HomeDir 'spicetify-settings.json'
+  if (-not (Test-Path $saved)) {
+    $settings = @{}
+    foreach ($line in Get-Content $config) {
+      if ($line -match '^\s*(current_theme|color_scheme|inject_css|inject_theme_js|replace_colors|overwrite_assets)\s*=\s*(.*?)\s*$') {
+        $settings[$Matches[1]] = $Matches[2]
+      }
+    }
+    $settings | ConvertTo-Json | Set-Content $saved -Encoding UTF8
+  }
+  $theme = Join-Path (Split-Path $config) 'Themes\m3ify'
+  [void](New-Item -ItemType Directory -Force $theme)
+  Copy-Item (Join-Path $HomeDir 'theme\m3.css') (Join-Path $theme 'user.css') -Force
+  Copy-Item (Join-Path $HomeDir 'theme\m3.js') (Join-Path $theme 'theme.js') -Force
+  Copy-Item (Join-Path $HomeDir 'theme\color.ini') $theme -Force
+  Invoke-Spice @('config', 'current_theme', 'm3ify', 'color_scheme', 'Base', 'inject_css', '1', 'inject_theme_js', '1', 'replace_colors', '1', 'overwrite_assets', '0')
+}
+
+function Test-NeedsRepair {
+  if (Test-Path (Join-Path $HomeDir 'suspended')) { return $false }
+  if (Test-Path $Spa) { return $true }
+  $st = Get-State
+  if (-not $st -or $st.version -ne $Version -or $st.spotify -ne (Get-SpotifyVersion)) { return $true }
+  $css = Join-Path $Xpui 'user.css'
+  $js = Join-Path $Xpui 'extensions\theme.js'
   $index = Join-Path $Xpui 'index.html'
-  $html = [IO.File]::ReadAllText($index)
-  if ($html -match 'spicetify' -and $html -notmatch [regex]::Escape($Marker)) {
-    Die (L 'Spotify сейчас пропатчен spicetify. Сначала выполни: spicetify restore' 'Spotify is currently patched by spicetify. Run first: spicetify restore')
+  if (-not (Test-Path $css) -or -not (Test-Path $js) -or -not (Test-Path $index)) { return $true }
+  if ([IO.File]::ReadAllText($index) -notmatch 'theme\.js') { return $true }
+  if ((Get-FileHash $js).Hash -ne (Get-FileHash (Join-Path $HomeDir 'theme\m3.js')).Hash) { return $true }
+  [IO.File]::ReadAllText($css) -notmatch 'm3ify-theme:1.4.0'
+}
+
+function Invoke-Apply([switch]$Background) {
+  Assert-Spotify
+  if (-not (Test-Path (Join-Path $HomeDir 'theme\m3.css'))) { Die 'Theme missing — run install.cmd' }
+  if ($Background) {
+    if (Get-Process -Name Spotify,SpotifySetup -ErrorAction SilentlyContinue) { return }
+  } else { Stop-Spotify }
+  # Migrate the old direct injection only with a backup from this Spotify version.
+  $st = Get-State
+  if (-not (Test-Path $Spa) -and $st -and $st.version -ne $Version -and
+      (Test-Path (Join-Path $Xpui 'm3\m3.css'))) {
+    $bak = Join-Path $BackupDir 'xpui.spa'
+    if ($st.spotify -ne (Get-SpotifyVersion) -or -not (Test-Path $bak)) { Die 'Legacy backup does not match Spotify — reinstall Spotify, then run install.cmd' }
+    Copy-Item $bak $Spa -Force
   }
-
-  $dst = Join-Path $Xpui 'm3'
-  [void](New-Item -ItemType Directory -Force $dst)
-  Copy-Item (Join-Path $HomeDir 'theme\*') $dst -Force
-
-  $v = [DateTime]::Now.Ticks
-  $tag = "$Marker<link rel=""stylesheet"" href=""/m3/m3.css?v=$v""><script defer src=""/m3/m3.js?v=$v""></script><!--/m3ify-->"
-  $html = [regex]::Replace($html, '<!--m3ify-->.*?<!--/m3ify-->', '', 'Singleline')
-  # CSS — после стилей Spotify (в конце head), чтобы перебивать их без гонки за специфичностью
-  $html = $html.Replace('</head>', "$tag</head>")
-  [IO.File]::WriteAllText($index, $html, (New-Object Text.UTF8Encoding $false))
-  Ok (L 'Material 3 внедрён' 'Material 3 injected')
-
+  Set-SpiceTheme
+  if (Test-Path $Spa) { Invoke-Spice @('backup', 'apply', '-n') }
+  else { Invoke-Spice @('apply', '-n') }
   Save-State ([pscustomobject]@{ version = $Version; spotify = (Get-SpotifyVersion); applied = (Get-Date).ToString('s') })
+  Remove-Item (Join-Path $HomeDir 'suspended') -ErrorAction SilentlyContinue
+  Ok (L 'Material 3 и Spicetify применены' 'Material 3 and Spicetify applied')
+}
+
+function Invoke-Repair {
+  Assert-Spotify
+  if (-not (Test-NeedsRepair)) { return }
+  # Never interrupt music or compete with Spotify's updater.
+  if (Get-Process -Name Spotify,SpotifySetup -ErrorAction SilentlyContinue) { return }
+  $before = Get-SpotifyVersion
+  Start-Sleep -Seconds 2
+  if ($before -ne (Get-SpotifyVersion) -or (Get-Process -Name Spotify,SpotifySetup -ErrorAction SilentlyContinue)) { return }
+  try { Invoke-Apply -Background } catch {
+    Add-Content (Join-Path $HomeDir 'repair.log') ("$(Get-Date -Format s) $($_.Exception.Message)")
+    # A new Spotify build may need a newer Spicetify. Try once per Spotify version.
+    $attempt = Join-Path $HomeDir 'upgrade-attempt.txt'
+    if ((Test-Path $attempt) -and (Get-Content $attempt -Raw).Trim() -eq $before) { throw }
+    Set-Content $attempt $before
+    Invoke-Spice @('upgrade')
+    if (Get-Process -Name Spotify,SpotifySetup -ErrorAction SilentlyContinue) { return }
+    if (-not (Test-Path $Spa)) { Invoke-Spice @('restore', '-n') }
+    Invoke-Apply -Background
+  }
+}
+
+function Register-AutoRepair {
+  $scriptPath = Join-Path $HomeDir 'm3ify.ps1'
+  $action = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" repair -Quiet"
+  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes 2)
+  $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+  $taskName = 'm3ify AutoRepair ' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -RunLevel Limited -Force | Out-Null
+}
+
+function Unregister-AutoRepair {
+  $taskName = 'm3ify AutoRepair ' + [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 function Invoke-Restore {
   Assert-Spotify
   Stop-Spotify
-  $bak = Join-Path $BackupDir 'xpui.spa'
-  if (Test-Path $Spa) {
-    if (Test-Path $Xpui) { Remove-Item $Xpui -Recurse -Force }
-    Ok (L 'Spotify уже оригинальный (xpui.spa на месте)' 'Spotify is already original (xpui.spa is in place)')
-  } elseif (Test-Path $bak) {
-    Copy-Item $bak $Spa -Force
-    if (Test-Path $Xpui) { Remove-Item $Xpui -Recurse -Force }
-    Ok (L 'оригинальный Spotify восстановлен' 'original Spotify restored')
-  } else {
-    Die (L 'нет бэкапа — переустанови Spotify поверх, это безопасно' 'no backup found — reinstall Spotify over itself, it is safe')
+  # Suppress automatic reapplication until an explicit apply/install.
+  Set-Content (Join-Path $HomeDir 'suspended') ''
+  if (Test-Path $Spa) { Invoke-Spice @('backup', 'restore', '-n') }
+  else { Invoke-Spice @('restore', '-n') }
+  $saved = Join-Path $HomeDir 'spicetify-settings.json'
+  if (Test-Path $saved) {
+    foreach ($setting in (Get-Content $saved -Raw | ConvertFrom-Json).PSObject.Properties) {
+      Invoke-Spice @('config', $setting.Name, [string]$setting.Value)
+    }
+    Remove-Item $saved
   }
+  Ok (L 'оригинальный Spotify восстановлен' 'original Spotify restored')
 }
 
 # ── Иконка: Spotify-логотип в стиле Material 3 (squircle + тональные цвета) ──
@@ -317,7 +444,9 @@ function Invoke-Install {
   } elseif (-not (Test-Path $IconFile)) {
     New-M3Icon $IconFile; Ok (L 'иконка Material 3 сгенерирована' 'Material 3 icon generated')
   }
+  Install-Spicetify
   Invoke-Apply
+  Register-AutoRepair
   if (Test-Path $Launcher) {
     # лаунчер мог быть запущен — тогда exe занят; старый вариант тоже рабочий
     try { Build-Launcher } catch { Say (L '  [!] лаунчер занят, оставлен прежний' '  [!] launcher is in use, kept the previous one') 'Yellow' }
@@ -327,31 +456,45 @@ function Invoke-Install {
   Say (L "  Иконка M3 на панели задач: запусти Spotify, ПКМ по его кнопке → «Закрепить на панели задач», потом запусти reapply.cmd.`n" "  M3 icon on the taskbar: start Spotify, right-click its button → Pin to taskbar, then run reapply.cmd.`n") 'Cyan'
 }
 
+$mutex = New-Object Threading.Mutex($false, 'Local\m3ify-patch')
+$locked = $false
+try {
+  try { $locked = $mutex.WaitOne(120000) } catch [Threading.AbandonedMutexException] { $locked = $true }
+  if (-not $locked) { Die 'Another m3ify operation is still running' }
 switch ($Command) {
   'install'   { Invoke-Install }
   'apply'     { Invoke-Apply; if (Test-Path $Launcher) { Set-Icons }; Say (L '  Готово.' '  Done.') 'Cyan' }
+  'repair'    { Invoke-Repair }
   'restore'   { Invoke-Restore }
   'uninstall' {
-    Invoke-Restore; Reset-Icons
+    Invoke-Restore; Unregister-AutoRepair; Reset-Icons
     Set-Location $env:TEMP
-    Remove-Item $HomeDir -Recurse -Force -ErrorAction SilentlyContinue
+    $removePath = [IO.Path]::GetFullPath($HomeDir)
+    $expectedPath = Join-Path ([IO.Path]::GetFullPath($env:LOCALAPPDATA)) 'm3ify'
+    if ($removePath -ine $expectedPath) { Die 'Unexpected uninstall path' }
+    Remove-Item -LiteralPath $removePath -Recurse -Force
     Ok (L 'm3ify удалён' 'm3ify removed')
   }
   'launch' {
-    # Spotify при обновлении кладёт новый xpui.spa — значит тему надо переприменить
-    if (Test-Path $Launcher) { Start-Process $Launcher }
-    else {
-      if (Test-Path $Spa) { try { $script:Quiet = $true; Invoke-Apply } catch { } }
-      Start-Process $SpotifyExe
-    }
+    Invoke-Repair
+    Start-Process $SpotifyExe
   }
   'icon'   { New-M3Icon (Join-Path $SrcDir 'assets\spotify-m3.ico'); Ok 'assets\spotify-m3.ico' }
   'status' {
     Assert-Spotify
     $st = Get-State
-    $patched = (Test-Path (Join-Path $Xpui 'm3\m3.css')) -and -not (Test-Path $Spa)
+    $patched = -not (Test-Path $Spa) -and -not (Test-NeedsRepair) -and -not (Test-Path (Join-Path $HomeDir 'suspended'))
     Say "Spotify:  $(Get-SpotifyVersion)"
     Say "m3ify:    $(if ($patched) { L 'применён' 'applied' } elseif (Test-Path $Spa) { L 'не применён (или Spotify обновился — запусти apply)' 'not applied (or Spotify updated — run apply)' } else { L 'не применён' 'not applied' })"
     if ($st) { Say (L "Последний apply: $($st.applied) на Spotify $($st.spotify)" "Last apply: $($st.applied) on Spotify $($st.spotify)") }
   }
+}
+} catch {
+  [void](New-Item -ItemType Directory -Force $HomeDir)
+  Add-Content (Join-Path $HomeDir 'repair.log') ("$(Get-Date -Format s) $($_.Exception.Message)")
+  if (-not $Quiet) { Write-Error $_ -ErrorAction Continue }
+  exit 1
+} finally {
+  if ($locked) { $mutex.ReleaseMutex() }
+  $mutex.Dispose()
 }

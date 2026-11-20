@@ -1,14 +1,13 @@
 // m3launch — лаунчер Spotify для m3ify (в exe вшита M3-иконка).
-// 1) если Spotify обновился (появился новый xpui.spa — обновление заодно заменяет Spotify.exe),
-//    тихо переприменяет тему и иконку;
+// 1) проверяет версию и файлы темы через m3ify repair и ждёт завершения;
 // 2) запускает Spotify с теми же аргументами и сразу выходит — в памяти не висит.
-// Иконка окна и панели задач берётся из самого Spotify.exe (m3ify меняет в нём иконку),
-// поэтому никаких своих AppUserModelID окну больше не ставим.
+// Spotify.exe не меняется; иконка M3 используется только лаунчером и ярлыками.
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
 static class M3Launch
 {
@@ -45,7 +44,7 @@ static class M3Launch
         return ps.Commit();
     }
 
-    static string Quote(string a) { return a.Length > 0 && a.IndexOfAny(new[] { ' ', '"' }) < 0 ? a : "\"" + a.Replace("\"", "\\\"") + "\""; }
+    static string Quote(string a) { return "\"" + Regex.Replace(Regex.Replace(a, @"(\\*)""", "$1$1\\\""), @"(\\+)$", "$1$1") + "\""; }
 
     [STAThread]
     static int Main(string[] args)
@@ -57,15 +56,15 @@ static class M3Launch
         string spotifyDir = Path.Combine(appData, "Spotify");
         string spotify = Path.Combine(spotifyDir, "Spotify.exe");
 
-        if (Process.GetProcessesByName("Spotify").Length == 0 && File.Exists(Path.Combine(spotifyDir, @"Apps\xpui.spa")))
+        if (Process.GetProcessesByName("Spotify").Length == 0)
         {
             // Spotify обновился — возвращаем тему и иконку перед запуском
             try
             {
-                var psi = new ProcessStartInfo("powershell.exe",
-                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + Quote(Path.Combine(home, "m3ify.ps1")) + " apply -Quiet")
+                var psi = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
+                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " + Quote(Path.Combine(home, "m3ify.ps1")) + " repair -Quiet")
                 { CreateNoWindow = true, UseShellExecute = false };
-                using (var p = Process.Start(psi)) p.WaitForExit(120000);
+                using (var p = Process.Start(psi)) p.WaitForExit();
             }
             catch { }
         }
