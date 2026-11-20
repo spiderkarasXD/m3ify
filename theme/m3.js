@@ -57,7 +57,7 @@
     }
     const color = node('div', 'm3-colors'); color.setAttribute('role', 'group');
     const chooseColor = value => {
-      settings.color = value; settings.dynamic = false; persist();
+      settings.color = value; settings.dynamic = false; custom.value = value; persist();
       dialog.querySelector('[role="switch"]').setAttribute('aria-checked', 'false');
       for (const swatch of color.querySelectorAll('button')) swatch.setAttribute('aria-pressed', String(swatch.dataset.color === value));
     };
